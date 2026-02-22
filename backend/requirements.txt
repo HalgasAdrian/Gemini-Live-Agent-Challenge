@@ -1,0 +1,7 @@
+google-genai==1.64.0
+fastapi==0.129.0
+uvicorn[standard]>=0.30.0
+websockets==15.0
+pydantic-settings>=2.0.0
+google-cloud-firestore>=2.16.0
+python-dotenv>=1.0.0
