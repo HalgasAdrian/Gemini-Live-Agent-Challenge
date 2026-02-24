@@ -9,7 +9,7 @@ dev: ## Start both backend and frontend
 	@make -j2 dev-backend dev-frontend
 
 dev-backend: ## Start backend only
-	cd backend && . venv/bin/activate && uvicorn app.main:app --reload --port 8080
+	cd backend && . venv/bin/activate && uvicorn app.main:app --reload --port 8080 --reload-exclude 'venv/*'
 
 dev-frontend: ## Start frontend only
 	cd frontend && npm run dev
