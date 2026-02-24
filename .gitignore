@@ -30,7 +30,10 @@ yarn-error.log*
 .env
 .env.local
 .env.production
+.env.development
 .env*.local
+!.env.example
+!.env.local.example
 *.pem
 service-account*.json
 credentials*.json
@@ -38,7 +41,10 @@ credentials*.json
 # ============================================================================
 # IDE / Editor
 # ============================================================================
-.vscode/
+# Allow .vscode/settings.json (shared team config like Tailwind)
+# but ignore personal stuff like launch configs and extensions
+.vscode/*
+!.vscode/settings.json
 .idea/
 *.swp
 *.swo
