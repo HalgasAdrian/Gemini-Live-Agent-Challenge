@@ -8,10 +8,9 @@ services:
     ports:
       - "8080:8080"
     env_file:
-      - ./backend/.env
+      - .env
     environment:
       - ENABLE_FIRESTORE=false
-      - ALLOWED_ORIGINS=["http://localhost:3000"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 10s
