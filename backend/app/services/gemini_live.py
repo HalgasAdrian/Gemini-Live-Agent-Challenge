@@ -113,6 +113,7 @@ class LiveSession:
         Yields dicts with structure:
             {"type": "audio", "data": bytes}
             {"type": "text", "text": str}
+            {"type": "input_transcript", "text": str}
             {"type": "interrupted"}
             {"type": "turn_complete"}
             {"type": "tool_call", "tool_call": ...}
@@ -128,7 +129,7 @@ class LiveSession:
                         yield {"type": "interrupted"}
                         continue
 
-                    # Process model output parts
+                    # Process model output parts (audio data)
                     if sc.model_turn and sc.model_turn.parts:
                         for part in sc.model_turn.parts:
                             # Audio response
@@ -137,12 +138,26 @@ class LiveSession:
                                     "type": "audio",
                                     "data": part.inline_data.data,
                                 }
-                            # Text response (transcript)
+                            # Text part (fallback, some models still send this)
                             if part.text:
                                 yield {
                                     "type": "text",
                                     "text": part.text,
                                 }
+
+                    # Output audio transcription (agent's speech as text)
+                    if sc.output_transcription and sc.output_transcription.text:
+                        yield {
+                            "type": "text",
+                            "text": sc.output_transcription.text,
+                        }
+
+                    # Input audio transcription (user's speech as text)
+                    if sc.input_transcription and sc.input_transcription.text:
+                        yield {
+                            "type": "input_transcript",
+                            "text": sc.input_transcription.text,
+                        }
 
                     # Turn complete signal
                     if sc.turn_complete:
@@ -179,28 +194,29 @@ class LiveSession:
         # No explicit close needed — the context manager in ws.py handles it
 
 
-def build_live_config(preset: AgentPreset) -> types.LiveConnectConfig:
+def build_live_config(preset: AgentPreset) -> dict:
     """
-    Build the LiveConnectConfig for a given agent preset.
-    Separated out so ws.py can use it with the context manager.
+    Build the live connection config for a given agent preset.
+    Uses dict format for maximum compatibility with the native audio model.
+    
+    The native audio model (gemini-2.5-flash-native-audio-preview-12-2025):
+      - Only supports "AUDIO" as response modality (not "TEXT")
+      - Returns text via output_audio_transcription
+      - Input text transcription via input_audio_transcription
     """
+    config = {
+        "response_modalities": ["AUDIO"],
+        "system_instruction": preset.system_prompt,
+        # Get text transcripts of both input and output audio
+        "output_audio_transcription": {},
+        "input_audio_transcription": {},
+    }
+
+    # Add tools if enabled
     tools = []
     if "google_search" in preset.tools_enabled:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
-
-    config = types.LiveConnectConfig(
-        response_modalities=["AUDIO", "TEXT"],
-        system_instruction=types.Content(
-            parts=[types.Part(text=preset.system_prompt)]
-        ),
-        speech_config=types.SpeechConfig(
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                    voice_name=preset.voice,
-                )
-            )
-        ),
-        tools=tools if tools else None,
-    )
+    if tools:
+        config["tools"] = tools
 
     return config

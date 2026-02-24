@@ -1,13 +1,6 @@
 import { useRef, useState, useCallback } from "react";
 import { AUDIO_SEND_SAMPLE_RATE, AUDIO_CHUNK_SIZE } from "@/lib/constants";
 
-/**
- * Captures microphone audio and converts it to PCM 16-bit 16kHz mono chunks.
- *
- * Usage:
- *   const { start, stop, isCapturing } = useAudioCapture(onChunk);
- *   // onChunk receives ArrayBuffer of Int16 PCM data
- */
 export function useAudioCapture(
   onChunk: (pcmBuffer: ArrayBuffer) => void
 ) {
@@ -33,7 +26,6 @@ export function useAudioCapture(
 
       processor.onaudioprocess = (e) => {
         const float32 = e.inputBuffer.getChannelData(0);
-        // Convert Float32 (-1.0 to 1.0) → Int16 (-32768 to 32767)
         const int16 = new Int16Array(float32.length);
         for (let i = 0; i < float32.length; i++) {
           const s = Math.max(-1, Math.min(1, float32[i]));

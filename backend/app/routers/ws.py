@@ -207,6 +207,17 @@ async def _forward_gemini_to_client(
                 await ws.send_json({"type": "interrupted"})
                 logger.debug(f"Session {user_session.session_id}: interrupted")
 
+            elif event_type == "input_transcript":
+                # User's speech transcribed to text
+                await ws.send_json({
+                    "type": "input_transcript",
+                    "text": event["text"],
+                })
+                user_session.log_turn("user", "text", event["text"])
+                await firestore.log_turn(
+                    user_session.session_id, "user", "text", event["text"]
+                )
+
             elif event_type == "turn_complete":
                 await ws.send_json({"type": "turn_complete"})
 

@@ -9,5 +9,4 @@ export const AUDIO_RECEIVE_SAMPLE_RATE = 24000; // What Gemini sends as OUTPUT
 export const AUDIO_CHANNELS = 1;                // Mono
 export const AUDIO_CHUNK_SIZE = 4096;           // Samples per chunk
 
-// How often to send camera frames (ms) — don't flood the API
 export const CAMERA_FRAME_INTERVAL_MS = 1000;

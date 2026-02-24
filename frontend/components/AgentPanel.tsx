@@ -13,16 +13,12 @@ import Controls from "./Controls";
 type SessionState = "idle" | "active";
 
 export default function AgentPanel() {
-  // ---- State ----
   const [sessionState, setSessionState] = useState<SessionState>("idle");
   const [agentName, setAgentName] = useState("general");
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const sessionIdRef = useRef<string>("");
-
-  // Buffer to accumulate streaming transcript chunks
   const assistantBufferRef = useRef<string>("");
 
-  // ---- Helpers ----
   const addEntry = useCallback(
     (role: "user" | "assistant" | "system", text: string) => {
       setTranscript((prev) => [
@@ -38,10 +34,8 @@ export default function AgentPanel() {
     []
   );
 
-  // ---- Audio Playback ----
   const { playChunk, flush: flushAudio } = useAudioPlayback();
 
-  // ---- WebSocket ----
   const handleAudioChunk = useCallback(
     (data: ArrayBuffer) => {
       playChunk(data);
@@ -58,12 +52,18 @@ export default function AgentPanel() {
           break;
 
         case "transcript":
-          // Accumulate streaming text, we'll flush on turn_complete
+          // Accumulate streaming agent transcript
           assistantBufferRef.current += (msg.text || "");
           break;
 
+        case "input_transcript":
+          // User's speech transcribed — show in chat
+          if (msg.text && msg.text.trim()) {
+            addEntry("user", msg.text);
+          }
+          break;
+
         case "turn_complete":
-          // Flush accumulated transcript
           if (assistantBufferRef.current) {
             addEntry("assistant", assistantBufferRef.current);
             assistantBufferRef.current = "";
@@ -72,7 +72,6 @@ export default function AgentPanel() {
 
         case "interrupted":
           flushAudio();
-          // Flush whatever partial transcript we had
           if (assistantBufferRef.current) {
             addEntry("assistant", assistantBufferRef.current + " [interrupted]");
             assistantBufferRef.current = "";
@@ -105,11 +104,9 @@ export default function AgentPanel() {
     onDisconnect: handleDisconnect,
   });
 
-  // ---- Mic ----
   const { start: startMic, stop: stopMic, isCapturing: isMicActive } =
     useAudioCapture(sendAudio);
 
-  // ---- Camera ----
   const {
     videoRef,
     start: startCamera,
@@ -117,7 +114,6 @@ export default function AgentPanel() {
     isActive: isCameraActive,
   } = useCameraCapture(sendImage);
 
-  // ---- Actions ----
   const handleStart = useCallback(
     (presetId: string) => {
       const sessionId = crypto.randomUUID();
@@ -161,7 +157,6 @@ export default function AgentPanel() {
     [sendText, addEntry]
   );
 
-  // ---- Render ----
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white">
       <StatusBar
@@ -175,7 +170,6 @@ export default function AgentPanel() {
         <AgentSelector onStart={handleStart} />
       ) : (
         <>
-          {/* Camera preview (shown when camera is active) */}
           {isCameraActive && (
             <div className="flex justify-center bg-black py-2">
               <video
