@@ -7,7 +7,9 @@ and interruption management. This is the core of the agent.
 
 import asyncio
 import logging
+import os
 import time
+
 from google import genai
 from google.genai import types
 
@@ -174,26 +176,18 @@ class LiveSession:
     async def close(self) -> None:
         """Close the Live API session."""
         self.is_active = False
-        try:
-            await self.session.close()
-        except Exception as e:
-            logger.warning(f"Error closing session: {e}")
+        # No explicit close needed — the context manager in ws.py handles it
 
 
-async def create_live_session(preset: AgentPreset) -> LiveSession:
+def build_live_config(preset: AgentPreset) -> types.LiveConnectConfig:
     """
-    Create a new Gemini Live API session with the given agent preset.
-    Returns a LiveSession wrapper.
+    Build the LiveConnectConfig for a given agent preset.
+    Separated out so ws.py can use it with the context manager.
     """
-    settings = get_settings()
-    client = get_gemini_client()
-
-    # Build tool list based on preset
     tools = []
     if "google_search" in preset.tools_enabled:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-    # Configure the live session
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO", "TEXT"],
         system_instruction=types.Content(
@@ -209,11 +203,4 @@ async def create_live_session(preset: AgentPreset) -> LiveSession:
         tools=tools if tools else None,
     )
 
-    logger.info(f"Creating Gemini Live session with preset '{preset.name}' (model={settings.gemini_model})")
-
-    session = await client.aio.live.connect(
-        model=settings.gemini_model,
-        config=config,
-    )
-
-    return LiveSession(session=session, preset=preset)
+    return config
