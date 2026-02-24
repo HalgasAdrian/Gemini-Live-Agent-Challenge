@@ -1,8 +1,8 @@
 import { useRef, useCallback } from "react";
-import { AUDIO_SAMPLE_RATE } from "@/lib/constants";
+import { AUDIO_RECEIVE_SAMPLE_RATE } from "@/lib/constants";
 
 /**
- * Plays streamed PCM 16-bit 16kHz audio chunks through the speakers.
+ * Plays streamed PCM 16-bit 24kHz audio chunks through the speakers.
  *
  * Queues chunks and plays them sequentially to avoid gaps/overlaps.
  */
@@ -13,7 +13,7 @@ export function useAudioPlayback() {
 
   const getContext = useCallback(() => {
     if (!ctxRef.current || ctxRef.current.state === "closed") {
-      ctxRef.current = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
+      ctxRef.current = new AudioContext({ sampleRate: AUDIO_RECEIVE_SAMPLE_RATE });
     }
     // Resume if suspended (browser autoplay policy)
     if (ctxRef.current.state === "suspended") {
@@ -34,7 +34,7 @@ export function useAudioPlayback() {
       }
 
       // Create audio buffer
-      const buffer = ctx.createBuffer(1, float32.length, AUDIO_SAMPLE_RATE);
+      const buffer = ctx.createBuffer(1, float32.length, AUDIO_RECEIVE_SAMPLE_RATE);
       buffer.getChannelData(0).set(float32);
 
       // Schedule playback sequentially

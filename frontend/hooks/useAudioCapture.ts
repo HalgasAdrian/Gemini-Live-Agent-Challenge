@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback } from "react";
-import { AUDIO_SAMPLE_RATE, AUDIO_CHUNK_SIZE } from "@/lib/constants";
+import { AUDIO_SEND_SAMPLE_RATE, AUDIO_CHUNK_SIZE } from "@/lib/constants";
 
 /**
  * Captures microphone audio and converts it to PCM 16-bit 16kHz mono chunks.
@@ -20,14 +20,14 @@ export function useAudioCapture(
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: AUDIO_SAMPLE_RATE,
+          sampleRate: AUDIO_SEND_SAMPLE_RATE,
           channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
         },
       });
 
-      const ctx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
+      const ctx = new AudioContext({ sampleRate: AUDIO_SEND_SAMPLE_RATE });
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(AUDIO_CHUNK_SIZE, 1, 1);
 

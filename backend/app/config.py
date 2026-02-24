@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash-live-001"
+    gemini_model: str = "gemini-2.5-flash-native-audio-preview-12-2025"
 
     # Server
     backend_host: str = "0.0.0.0"
@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(ENV_FILE)
         env_file_encoding = "utf-8"
-        extra = "ignore"
+        extra = "ignore"  
 
 
 @lru_cache
