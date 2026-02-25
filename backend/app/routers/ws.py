@@ -71,21 +71,24 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
             logger.info(f"Session {session_id} is live!")
 
             # ---- Step 3: Run bidirectional streaming ----
-            # Use tasks so we can cancel cleanly when one side drops
             client_task = asyncio.create_task(
-                _forward_client_to_gemini(ws, live_session, user_session)
+                _forward_client_to_gemini(ws, live_session, user_session),
+                name=f"client-{session_id[:8]}",
             )
             gemini_task = asyncio.create_task(
-                _forward_gemini_to_client(ws, live_session, user_session)
+                _forward_gemini_to_client(ws, live_session, user_session),
+                name=f"gemini-{session_id[:8]}",
             )
 
-            # Wait for EITHER task to finish (one side disconnected)
             done, pending = await asyncio.wait(
                 [client_task, gemini_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Cancel the other task gracefully
+            # Log which task finished first
+            for task in done:
+                logger.info(f"Task '{task.get_name()}' completed first in session {session_id}")
+
             for task in pending:
                 task.cancel()
                 try:
@@ -93,14 +96,13 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                 except (asyncio.CancelledError, Exception):
                     pass
 
-            # Check if a task raised a real error (not just disconnect)
             for task in done:
                 try:
                     task.result()
                 except (WebSocketDisconnect, asyncio.CancelledError):
-                    pass  # Normal shutdown
+                    pass
                 except Exception as e:
-                    logger.error(f"Task error in session {session_id}: {e}")
+                    logger.error(f"Task '{task.get_name()}' error: {e}")
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {session_id}")
@@ -128,18 +130,17 @@ async def _forward_client_to_gemini(
             try:
                 message = await ws.receive()
             except WebSocketDisconnect:
+                logger.info(f"Client WS disconnected in receive loop")
                 raise
             except RuntimeError:
-                # "Cannot call receive once a disconnect message has been received"
+                logger.info(f"Client WS already disconnected")
                 break
 
             user_session.touch()
 
-            # Binary frame = raw PCM audio
             if "bytes" in message and message["bytes"]:
                 await live_session.send_audio(message["bytes"])
 
-            # Text frame = JSON command
             elif "text" in message and message["text"]:
                 try:
                     msg = json.loads(message["text"])
@@ -152,6 +153,10 @@ async def _forward_client_to_gemini(
                     image_b64 = msg.get("data", "")
                     if image_b64:
                         image_bytes = base64.b64decode(image_b64)
+                        logger.info(
+                            f"📷 Camera frame received: {len(image_bytes)} bytes "
+                            f"(session {user_session.session_id[:8]})"
+                        )
                         await live_session.send_image(image_bytes)
                         user_session.log_turn("user", "image")
                         await firestore.log_turn(
@@ -161,6 +166,7 @@ async def _forward_client_to_gemini(
                 elif msg_type == "text":
                     text = msg.get("text", "")
                     if text:
+                        logger.info(f"User text: {text[:80]}")
                         await live_session.send_text(text)
                         user_session.log_turn("user", "text", text)
                         await firestore.log_turn(
@@ -168,7 +174,6 @@ async def _forward_client_to_gemini(
                         )
 
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected from session {user_session.session_id}")
         raise
     except asyncio.CancelledError:
         raise
@@ -182,46 +187,63 @@ async def _forward_gemini_to_client(
     live_session: LiveSession,
     user_session,
 ) -> None:
-    """Gemini responses → Client. Runs until Gemini stream ends."""
+    """
+    Gemini responses → Client.
+
+    The receive() generator may complete after a response turn on some models.
+    We wrap it in a while loop so the task stays alive for the full session.
+    """
     try:
-        async for event in live_session.receive():
-            user_session.touch()
-            event_type = event["type"]
+        while live_session.is_active:
+            event_count = 0
+            async for event in live_session.receive():
+                event_count += 1
+                user_session.touch()
+                event_type = event["type"]
 
-            try:
-                if event_type == "audio":
-                    await ws.send_bytes(event["data"])
+                try:
+                    if event_type == "audio":
+                        await ws.send_bytes(event["data"])
 
-                elif event_type == "text":
-                    await ws.send_json({
-                        "type": "transcript",
-                        "text": event["text"],
-                    })
-                    user_session.log_turn("assistant", "text", event["text"])
-                    await firestore.log_turn(
-                        user_session.session_id, "assistant", "text", event["text"]
-                    )
+                    elif event_type == "text":
+                        await ws.send_json({
+                            "type": "transcript",
+                            "text": event["text"],
+                        })
+                        user_session.log_turn("assistant", "text", event["text"])
+                        await firestore.log_turn(
+                            user_session.session_id, "assistant", "text", event["text"]
+                        )
 
-                elif event_type == "input_transcript":
-                    await ws.send_json({
-                        "type": "input_transcript",
-                        "text": event["text"],
-                    })
-                    user_session.log_turn("user", "text", event["text"])
+                    elif event_type == "input_transcript":
+                        await ws.send_json({
+                            "type": "input_transcript",
+                            "text": event["text"],
+                        })
+                        user_session.log_turn("user", "text", event["text"])
 
-                elif event_type == "interrupted":
-                    await ws.send_json({"type": "interrupted"})
-                    logger.debug(f"Session {user_session.session_id}: interrupted")
+                    elif event_type == "interrupted":
+                        await ws.send_json({"type": "interrupted"})
+                        logger.debug(f"Session {user_session.session_id}: interrupted")
 
-                elif event_type == "turn_complete":
-                    await ws.send_json({"type": "turn_complete"})
+                    elif event_type == "turn_complete":
+                        await ws.send_json({"type": "turn_complete"})
+                        logger.info(f"Session {user_session.session_id}: turn complete (turn #{live_session.turn_count})")
 
-                elif event_type == "tool_call":
-                    logger.info(f"Tool call: {event['tool_call']}")
+                    elif event_type == "tool_call":
+                        logger.info(f"Tool call: {event['tool_call']}")
 
-            except (WebSocketDisconnect, RuntimeError):
-                # Client gone, stop forwarding
-                break
+                except (WebSocketDisconnect, RuntimeError):
+                    live_session.is_active = False
+                    break
+
+            # If we get here, the async for completed (generator exhausted)
+            logger.warning(
+                f"Session {user_session.session_id}: Gemini receive stream ended "
+                f"after {event_count} events. Restarting receive loop..."
+            )
+            # Brief pause before restarting to avoid tight loop
+            await asyncio.sleep(0.1)
 
     except asyncio.CancelledError:
         raise

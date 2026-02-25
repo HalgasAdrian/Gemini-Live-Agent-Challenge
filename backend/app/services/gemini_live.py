@@ -59,6 +59,7 @@ class LiveSession:
         if not self.is_active:
             return
         try:
+            logger.info(f"📷 Sending image to Gemini: {len(image_data)} bytes ({mime_type})")
             await self.session.send(
                 input=types.LiveClientRealtimeInput(
                     media_chunks=[
@@ -66,8 +67,9 @@ class LiveSession:
                     ]
                 )
             )
+            logger.info("📷 Image sent to Gemini successfully")
         except Exception as e:
-            logger.error(f"Error sending image: {e}")
+            logger.error(f"Error sending image: {e}", exc_info=True)
             raise
 
     async def send_text(self, text: str) -> None:
