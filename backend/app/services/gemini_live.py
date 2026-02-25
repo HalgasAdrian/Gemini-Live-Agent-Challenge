@@ -1,8 +1,5 @@
 """
 Gemini Live API wrapper.
-
-Handles session creation, bidirectional streaming, tool execution,
-and interruption management. This is the core of the agent.
 """
 
 import asyncio
@@ -18,8 +15,6 @@ from app.agents.presets import AgentPreset
 
 logger = logging.getLogger(__name__)
 
-# ---- Initialize the Gemini client (singleton) ----
-
 _client: genai.Client | None = None
 
 
@@ -31,14 +26,8 @@ def get_gemini_client() -> genai.Client:
     return _client
 
 
-# ---- Live session wrapper ----
-
-
 class LiveSession:
-    """
-    Wraps a single Gemini Live API session with convenience methods
-    for sending audio, video frames, and text, and receiving responses.
-    """
+    """Wraps a Gemini Live API session."""
 
     def __init__(self, session, preset: AgentPreset):
         self.session = session
@@ -48,7 +37,6 @@ class LiveSession:
         self.turn_count = 0
 
     async def send_audio(self, audio_data: bytes) -> None:
-        """Send a chunk of PCM audio (16-bit, 16kHz, mono)."""
         if not self.is_active:
             return
         try:
@@ -68,17 +56,13 @@ class LiveSession:
             raise
 
     async def send_image(self, image_data: bytes, mime_type: str = "image/jpeg") -> None:
-        """Send a video/camera frame."""
         if not self.is_active:
             return
         try:
             await self.session.send(
                 input=types.LiveClientRealtimeInput(
                     media_chunks=[
-                        types.Blob(
-                            data=image_data,
-                            mime_type=mime_type,
-                        )
+                        types.Blob(data=image_data, mime_type=mime_type)
                     ]
                 )
             )
@@ -87,7 +71,6 @@ class LiveSession:
             raise
 
     async def send_text(self, text: str) -> None:
-        """Send a text message (for text-based interaction or context injection)."""
         if not self.is_active:
             return
         try:
@@ -109,75 +92,63 @@ class LiveSession:
     async def receive(self):
         """
         Async generator that yields parsed response events from Gemini.
-
-        Yields dicts with structure:
-            {"type": "audio", "data": bytes}
-            {"type": "text", "text": str}
-            {"type": "input_transcript", "text": str}
-            {"type": "interrupted"}
-            {"type": "turn_complete"}
-            {"type": "tool_call", "tool_call": ...}
+        Uses safe attribute access to handle varying response shapes
+        across different model versions.
         """
         try:
             async for response in self.session.receive():
-                # --- Handle server content (audio/text responses) ---
-                if response.server_content:
-                    sc = response.server_content
+                try:
+                    sc = getattr(response, "server_content", None)
 
-                    # Check for interruption
-                    if sc.interrupted:
-                        yield {"type": "interrupted"}
-                        continue
+                    if sc is not None:
+                        # Check for interruption
+                        if getattr(sc, "interrupted", False):
+                            yield {"type": "interrupted"}
+                            continue
 
-                    # Process model output parts (audio data)
-                    if sc.model_turn and sc.model_turn.parts:
-                        for part in sc.model_turn.parts:
-                            # Audio response
-                            if part.inline_data and part.inline_data.data:
-                                yield {
-                                    "type": "audio",
-                                    "data": part.inline_data.data,
-                                }
-                            # Text part (fallback, some models still send this)
-                            if part.text:
-                                yield {
-                                    "type": "text",
-                                    "text": part.text,
-                                }
+                        # Process model output parts (audio data)
+                        model_turn = getattr(sc, "model_turn", None)
+                        if model_turn and getattr(model_turn, "parts", None):
+                            for part in model_turn.parts:
+                                inline = getattr(part, "inline_data", None)
+                                if inline and getattr(inline, "data", None):
+                                    yield {"type": "audio", "data": inline.data}
 
-                    # Output audio transcription (agent's speech as text)
-                    if sc.output_transcription and sc.output_transcription.text:
-                        yield {
-                            "type": "text",
-                            "text": sc.output_transcription.text,
-                        }
+                                text = getattr(part, "text", None)
+                                if text:
+                                    yield {"type": "text", "text": text}
 
-                    # Input audio transcription (user's speech as text)
-                    if sc.input_transcription and sc.input_transcription.text:
-                        yield {
-                            "type": "input_transcript",
-                            "text": sc.input_transcription.text,
-                        }
+                        # Output transcription (agent's speech → text)
+                        out_t = getattr(sc, "output_transcription", None)
+                        if out_t and getattr(out_t, "text", None):
+                            yield {"type": "text", "text": out_t.text}
 
-                    # Turn complete signal
-                    if sc.turn_complete:
-                        self.turn_count += 1
-                        yield {"type": "turn_complete"}
+                        # Input transcription (user's speech → text)
+                        in_t = getattr(sc, "input_transcription", None)
+                        if in_t and getattr(in_t, "text", None):
+                            yield {"type": "input_transcript", "text": in_t.text}
 
-                # --- Handle tool calls ---
-                if response.tool_call:
-                    yield {
-                        "type": "tool_call",
-                        "tool_call": response.tool_call,
-                    }
+                        # Turn complete
+                        if getattr(sc, "turn_complete", False):
+                            self.turn_count += 1
+                            yield {"type": "turn_complete"}
+
+                    # Handle tool calls
+                    tc = getattr(response, "tool_call", None)
+                    if tc:
+                        yield {"type": "tool_call", "tool_call": tc}
+
+                except Exception as inner_e:
+                    # Log but don't crash — one bad message shouldn't kill the session
+                    logger.warning(f"Error processing Gemini response: {inner_e}")
+                    continue
 
         except Exception as e:
-            logger.error(f"Error in receive loop: {e}")
+            logger.error(f"Gemini receive stream ended: {e}")
             self.is_active = False
             raise
 
     async def send_tool_response(self, function_responses: list) -> None:
-        """Send tool/function call results back to Gemini."""
         try:
             await self.session.send(
                 input=types.LiveClientToolResponse(
@@ -189,30 +160,21 @@ class LiveSession:
             raise
 
     async def close(self) -> None:
-        """Close the Live API session."""
         self.is_active = False
-        # No explicit close needed — the context manager in ws.py handles it
 
 
 def build_live_config(preset: AgentPreset) -> dict:
     """
     Build the live connection config for a given agent preset.
     Uses dict format for maximum compatibility with the native audio model.
-    
-    The native audio model (gemini-2.5-flash-native-audio-preview-12-2025):
-      - Only supports "AUDIO" as response modality (not "TEXT")
-      - Returns text via output_audio_transcription
-      - Input text transcription via input_audio_transcription
     """
     config = {
         "response_modalities": ["AUDIO"],
         "system_instruction": preset.system_prompt,
-        # Get text transcripts of both input and output audio
         "output_audio_transcription": {},
         "input_audio_transcription": {},
     }
 
-    # Add tools if enabled
     tools = []
     if "google_search" in preset.tools_enabled:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
