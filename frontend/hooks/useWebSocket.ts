@@ -6,6 +6,7 @@ export type WSStatus = "disconnected" | "connecting" | "connected" | "error";
 export interface WSMessage {
   type: "transcript" | "input_transcript" | "interrupted" | "turn_complete" | "session_ready" | "error";
   text?: string;
+  partial_text?: string;
   session_id?: string;
   agent?: string;
   message?: string;

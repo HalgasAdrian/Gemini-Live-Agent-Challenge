@@ -9,6 +9,7 @@ import AgentSelector from "./AgentSelector";
 import StatusBar from "./StatusBar";
 import TranscriptView, { TranscriptEntry } from "./TranscriptView";
 import Controls from "./Controls";
+import AgentStateIndicator, { AgentState } from "./AgentStateIndicator";
 
 type SessionState = "idle" | "active";
 
@@ -16,62 +17,93 @@ export default function AgentPanel() {
   const [sessionState, setSessionState] = useState<SessionState>("idle");
   const [agentName, setAgentName] = useState("general");
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [agentState, setAgentState] = useState<AgentState>("idle");
   const sessionIdRef = useRef<string>("");
   const assistantBufferRef = useRef<string>("");
 
-  const addEntry = useCallback((role: "user" | "assistant" | "system", text: string) => {
-    setTranscript((prev) => [
-      ...prev,
-      {
-        id: `${Date.now()}-${Math.random()}`,
-        role,
-        text,
-        timestamp: Date.now(),
-      },
-    ]);
-  }, []);
+  const agentSpeakingRef = useRef(false);
+  const interruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { playChunk, flush: flushAudio } = useAudioPlayback();
+  const addEntry = useCallback(
+    (role: "user" | "assistant" | "system", text: string) => {
+      setTranscript((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          role,
+          text,
+          timestamp: Date.now(),
+        },
+      ]);
+    },
+    []
+  );
 
-  const handleAudioChunk = useCallback((data: ArrayBuffer) => {
-    playChunk(data);
-  }, [playChunk]);
+  const { playChunk, fadeOut, flush: flushAudio } = useAudioPlayback();
 
-  const handleMessage = useCallback((msg: WSMessage) => {
-    switch (msg.type) {
-      case "session_ready":
-        setAgentName(msg.agent || "general");
-        addEntry("system", `Connected to ${msg.agent || "general"} agent.`);
-        break;
-      case "transcript":
-        assistantBufferRef.current += (msg.text || "");
-        break;
-      case "input_transcript":
-        if (msg.text && msg.text.trim()) {
-          addEntry("user", msg.text);
-        }
-        break;
-      case "turn_complete":
-        if (assistantBufferRef.current) {
-          addEntry("assistant", assistantBufferRef.current);
-          assistantBufferRef.current = "";
-        }
-        break;
-      case "interrupted":
-        flushAudio();
-        if (assistantBufferRef.current) {
-          addEntry("assistant", assistantBufferRef.current + " [interrupted]");
-          assistantBufferRef.current = "";
-        }
-        break;
-      case "error":
-        addEntry("system", `Error: ${msg.message}`);
-        break;
-    }
-  }, [addEntry, flushAudio]);
+  const handleAudioChunk = useCallback(
+    (data: ArrayBuffer) => {
+      playChunk(data);
+      agentSpeakingRef.current = true;
+      setAgentState("speaking");
+    },
+    [playChunk]
+  );
+
+  const handleMessage = useCallback(
+    (msg: WSMessage) => {
+      switch (msg.type) {
+        case "session_ready":
+          setAgentName(msg.agent || "general");
+          setAgentState("listening");
+          addEntry("system", `Connected to ${msg.agent || "general"} agent.`);
+          break;
+
+        case "transcript":
+          assistantBufferRef.current += (msg.text || "");
+          setAgentState("speaking");
+          break;
+
+        case "input_transcript":
+          if (msg.text && msg.text.trim()) {
+            addEntry("user", msg.text);
+          }
+          break;
+
+        case "turn_complete":
+          agentSpeakingRef.current = false;
+          if (assistantBufferRef.current) {
+            addEntry("assistant", assistantBufferRef.current);
+            assistantBufferRef.current = "";
+          }
+          setAgentState("idle");
+          setTimeout(() => setAgentState("listening"), 300);
+          break;
+
+        case "interrupted":
+          fadeOut();
+          agentSpeakingRef.current = false;
+
+          if (assistantBufferRef.current) {
+            addEntry("assistant", assistantBufferRef.current.trimEnd() + " ...");
+            assistantBufferRef.current = "";
+          }
+
+          setAgentState("listening");
+          break;
+
+        case "error":
+          addEntry("system", `Error: ${msg.message}`);
+          setAgentState("idle");
+          break;
+      }
+    },
+    [addEntry, fadeOut]
+  );
 
   const handleDisconnect = useCallback(() => {
     setSessionState("idle");
+    setAgentState("idle");
     addEntry("system", "Session ended.");
   }, [addEntry]);
 
@@ -88,7 +120,26 @@ export default function AgentPanel() {
     onDisconnect: handleDisconnect,
   });
 
-  const { start: startMic, stop: stopMic, isCapturing: isMicActive } = useAudioCapture(sendAudio);
+  const handleAudioCapture = useCallback(
+    (pcmBuffer: ArrayBuffer) => {
+      sendAudio(pcmBuffer);
+
+      if (agentSpeakingRef.current) {
+        if (interruptTimerRef.current) {
+          clearTimeout(interruptTimerRef.current);
+        }
+        interruptTimerRef.current = setTimeout(() => {
+          if (agentSpeakingRef.current) {
+            setAgentState("listening");
+          }
+        }, 300);
+      }
+    },
+    [sendAudio]
+  );
+
+  const { start: startMic, stop: stopMic, isCapturing: isMicActive } =
+    useAudioCapture(handleAudioCapture);
 
   const {
     videoRef,
@@ -97,20 +148,25 @@ export default function AgentPanel() {
     isActive: isCameraActive,
   } = useCameraCapture(sendImage);
 
-  const handleStart = useCallback((presetId: string) => {
-    const sessionId = crypto.randomUUID();
-    sessionIdRef.current = sessionId;
-    setSessionState("active");
-    setTranscript([]);
-    setAgentName(presetId);
-    connect(sessionId, presetId);
-  }, [connect]);
+  const handleStart = useCallback(
+    (presetId: string) => {
+      const sessionId = crypto.randomUUID();
+      sessionIdRef.current = sessionId;
+      setSessionState("active");
+      setTranscript([]);
+      setAgentName(presetId);
+      setAgentState("idle");
+      connect(sessionId, presetId);
+    },
+    [connect]
+  );
 
   const handleToggleMic = useCallback(async () => {
     if (isMicActive) {
       stopMic();
     } else {
       await startMic();
+      setAgentState("listening");
     }
   }, [isMicActive, startMic, stopMic]);
 
@@ -123,19 +179,28 @@ export default function AgentPanel() {
   }, [isCameraActive, startCamera, stopCamera]);
 
   const handleEndSession = useCallback(() => {
+    if (interruptTimerRef.current) {
+      clearTimeout(interruptTimerRef.current);
+    }
     stopMic();
     stopCamera();
+    flushAudio();
     disconnect();
     setSessionState("idle");
-  }, [stopMic, stopCamera, disconnect]);
+    setAgentState("idle");
+  }, [stopMic, stopCamera, flushAudio, disconnect]);
 
-  const handleSendText = useCallback((text: string) => {
-    sendText(text);
-    addEntry("user", text);
-  }, [sendText, addEntry]);
+  const handleSendText = useCallback(
+    (text: string) => {
+      sendText(text);
+      addEntry("user", text);
+      setAgentState("thinking");
+    },
+    [sendText, addEntry]
+  );
 
   return (
-    <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden">
+    <div className="flex flex-col h-screen bg-gray-950 text-white">
       <StatusBar
         wsStatus={wsStatus}
         agentName={agentName}
@@ -146,50 +211,35 @@ export default function AgentPanel() {
       {sessionState === "idle" ? (
         <AgentSelector onStart={handleStart} />
       ) : (
-        <div className="relative flex-1 flex flex-col overflow-hidden">
-          
-          <div className="flex-1 overflow-hidden">
-             <TranscriptView entries={transcript} />
-          </div>
+        <>
+          <AgentStateIndicator state={agentState} />
 
-          {/* MAIN CONTAINER: Centered at the bottom */}
-          <div className="fixed bottom-8 left-0 right-0 z-50 flex justify-center px-4">
-            <div className="w-full max-w-md flex flex-col items-center gap-4 bg-gray-900/95 backdrop-blur-xl p-6 rounded-[32px] border border-gray-800 shadow-2xl">
-              
-              {/* CAMERA AREA: We use a wrapper to ensure centering */}
-              {isCameraActive && (
-                <div className="w-full flex justify-center mb-2">
-                  <div className="relative w-40 h-28 overflow-hidden rounded-xl border border-gray-700 bg-black shadow-lg">
-                    <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 bg-black/60 rounded-full px-2 py-0.5 border border-white/10">
-                      <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                      <span className="text-[8px] text-white font-bold">LIVE</span>
-                    </div>
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* CONTROLS COMPONENT */}
-              <div className="w-full">
-                <Controls
-                  isMicActive={isMicActive}
-                  isCameraActive={isCameraActive}
-                  isConnected={wsStatus === "connected"}
-                  onToggleMic={handleToggleMic}
-                  onToggleCamera={handleToggleCamera}
-                  onEndSession={handleEndSession}
-                  onSendText={handleSendText}
-                />
-              </div>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`fixed bottom-32 right-4 z-50 w-48 h-36 rounded-xl object-cover border-2 border-gray-600 shadow-lg shadow-black/50 ${isCameraActive ? "" : "hidden"}`}
+          />
+          {isCameraActive && (
+            <div className="fixed bottom-[10.5rem] right-5 z-50 flex items-center gap-1.5 bg-black/60 rounded-full px-2 py-0.5">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-[10px] text-white font-medium">LIVE</span>
             </div>
-          </div>
-        </div>
+          )}
+
+          <TranscriptView entries={transcript} />
+
+          <Controls
+            isMicActive={isMicActive}
+            isCameraActive={isCameraActive}
+            isConnected={wsStatus === "connected"}
+            onToggleMic={handleToggleMic}
+            onToggleCamera={handleToggleCamera}
+            onEndSession={handleEndSession}
+            onSendText={handleSendText}
+          />
+        </>
       )}
     </div>
   );
