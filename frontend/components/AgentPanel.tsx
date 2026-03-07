@@ -9,6 +9,7 @@ import AgentSelector from "./AgentSelector";
 import StatusBar from "./StatusBar";
 import TranscriptView, { TranscriptEntry } from "./TranscriptView";
 import Controls from "./Controls";
+import AgentStateIndicator, { AgentState } from "./AgentStateIndicator";
 
 type SessionState = "idle" | "active";
 
@@ -16,8 +17,12 @@ export default function AgentPanel() {
   const [sessionState, setSessionState] = useState<SessionState>("idle");
   const [agentName, setAgentName] = useState("general");
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [agentState, setAgentState] = useState<AgentState>("idle");
   const sessionIdRef = useRef<string>("");
   const assistantBufferRef = useRef<string>("");
+
+  const agentSpeakingRef = useRef(false);
+  const interruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const addEntry = useCallback(
     (role: "user" | "assistant" | "system", text: string) => {
@@ -34,11 +39,13 @@ export default function AgentPanel() {
     []
   );
 
-  const { playChunk, flush: flushAudio } = useAudioPlayback();
+  const { playChunk, fadeOut, flush: flushAudio } = useAudioPlayback();
 
   const handleAudioChunk = useCallback(
     (data: ArrayBuffer) => {
       playChunk(data);
+      agentSpeakingRef.current = true;
+      setAgentState("speaking");
     },
     [playChunk]
   );
@@ -48,46 +55,55 @@ export default function AgentPanel() {
       switch (msg.type) {
         case "session_ready":
           setAgentName(msg.agent || "general");
+          setAgentState("listening");
           addEntry("system", `Connected to ${msg.agent || "general"} agent.`);
           break;
 
         case "transcript":
-          // Accumulate streaming agent transcript
           assistantBufferRef.current += (msg.text || "");
+          setAgentState("speaking");
           break;
 
         case "input_transcript":
-          // User's speech transcribed — show in chat
           if (msg.text && msg.text.trim()) {
             addEntry("user", msg.text);
           }
           break;
 
         case "turn_complete":
+          agentSpeakingRef.current = false;
           if (assistantBufferRef.current) {
             addEntry("assistant", assistantBufferRef.current);
             assistantBufferRef.current = "";
           }
+          setAgentState("idle");
+          setTimeout(() => setAgentState("listening"), 300);
           break;
 
         case "interrupted":
-          flushAudio();
+          fadeOut();
+          agentSpeakingRef.current = false;
+
           if (assistantBufferRef.current) {
-            addEntry("assistant", assistantBufferRef.current + " [interrupted]");
+            addEntry("assistant", assistantBufferRef.current.trimEnd() + " ...");
             assistantBufferRef.current = "";
           }
+
+          setAgentState("listening");
           break;
 
         case "error":
           addEntry("system", `Error: ${msg.message}`);
+          setAgentState("idle");
           break;
       }
     },
-    [addEntry, flushAudio]
+    [addEntry, fadeOut]
   );
 
   const handleDisconnect = useCallback(() => {
     setSessionState("idle");
+    setAgentState("idle");
     addEntry("system", "Session ended.");
   }, [addEntry]);
 
@@ -104,8 +120,26 @@ export default function AgentPanel() {
     onDisconnect: handleDisconnect,
   });
 
+  const handleAudioCapture = useCallback(
+    (pcmBuffer: ArrayBuffer) => {
+      sendAudio(pcmBuffer);
+
+      if (agentSpeakingRef.current) {
+        if (interruptTimerRef.current) {
+          clearTimeout(interruptTimerRef.current);
+        }
+        interruptTimerRef.current = setTimeout(() => {
+          if (agentSpeakingRef.current) {
+            setAgentState("listening");
+          }
+        }, 300);
+      }
+    },
+    [sendAudio]
+  );
+
   const { start: startMic, stop: stopMic, isCapturing: isMicActive } =
-    useAudioCapture(sendAudio);
+    useAudioCapture(handleAudioCapture);
 
   const {
     videoRef,
@@ -121,6 +155,7 @@ export default function AgentPanel() {
       setSessionState("active");
       setTranscript([]);
       setAgentName(presetId);
+      setAgentState("idle");
       connect(sessionId, presetId);
     },
     [connect]
@@ -131,6 +166,7 @@ export default function AgentPanel() {
       stopMic();
     } else {
       await startMic();
+      setAgentState("listening");
     }
   }, [isMicActive, startMic, stopMic]);
 
@@ -143,16 +179,22 @@ export default function AgentPanel() {
   }, [isCameraActive, startCamera, stopCamera]);
 
   const handleEndSession = useCallback(() => {
+    if (interruptTimerRef.current) {
+      clearTimeout(interruptTimerRef.current);
+    }
     stopMic();
     stopCamera();
+    flushAudio();
     disconnect();
     setSessionState("idle");
-  }, [stopMic, stopCamera, disconnect]);
+    setAgentState("idle");
+  }, [stopMic, stopCamera, flushAudio, disconnect]);
 
   const handleSendText = useCallback(
     (text: string) => {
       sendText(text);
       addEntry("user", text);
+      setAgentState("thinking");
     },
     [sendText, addEntry]
   );
@@ -170,7 +212,8 @@ export default function AgentPanel() {
         <AgentSelector onStart={handleStart} />
       ) : (
         <>
-          {/* Camera preview — fixed position, never moves regardless of scroll */}
+          <AgentStateIndicator state={agentState} />
+
           <video
             ref={videoRef}
             autoPlay

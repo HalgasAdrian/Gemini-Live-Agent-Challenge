@@ -24,28 +24,33 @@ cd gemini-live-agent
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 
-# 3. Copy env and add your Gemini API key
-cp .env.example .env
+# 3. Install dependencies
+cd backend && pip install -r requirements.txt && cd ..
+cd frontend && npm install && cd ..
 
-# 4. Install & run
-
-# Mac/Linux:
-make install
-make dev
-
-# 5. Open http://localhost:3000
+# 4. Copy env and add your Gemini API key
+cp .env.example .env              # Windows: copy .env.example .env
 ```
 
-#### Windows Setup
+#### Mac/Linux
 
-Open **two separate PowerShell terminals**:
+```bash
+make dev
+# Open http://localhost:3000
+```
+
+#### Windows
+
+Open **two separate terminals**:
 
 ```powershell
 # Terminal 1 — Backend
-cd backend; .\venv\Scripts\Activate.ps1; uvicorn app.main:app --reload --port 8080
+cd backend
+uvicorn app.main:app --reload --port 8080
 
 # Terminal 2 — Frontend
-cd frontend; npm run dev
+cd frontend
+npm run dev
 ```
 
 Then open http://localhost:3000
