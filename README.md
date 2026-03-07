@@ -20,37 +20,30 @@ Built for the **#GeminiLiveAgentChallenge** hackathon.
 git clone https://github.com/YOUR_TEAM/gemini-live-agent.git
 cd gemini-live-agent
 
-# 2. Set up backend
-cd backend
+# VENV instructions:
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env              # Add your GEMINI_API_KEY
 
-# 3. Start backend
-uvicorn app.main:app --reload --port 8080
+# 2. Copy env and add your Gemini API key
+cp .env.example .env
 
-# 4. In a new terminal — set up frontend
-cd frontend
-npm install
-cp .env.local.example .env.local
+# 3. Install & run
 
-# 5. Start frontend
-npm run dev
+# Mac/Linux:
+make install
+make dev
 
-# 6. Open http://localhost:3000
-```
+# Windows (PowerShell):
+.\dev.ps1 install
+.\dev.ps1 dev
 
-Or use the Makefile shortcut:
-```bash
-make install                      # Install everything
-make dev                          # Start both servers
+# 4. Open http://localhost:3000
 ```
 
 ### Option B: Docker
 
 ```bash
-# Add your GEMINI_API_KEY to backend/.env first
+# Add your GEMINI_API_KEY to .env first
 docker compose up --build
 # Open http://localhost:3000
 ```
@@ -63,7 +56,7 @@ docker compose up --build
 |-----------|-----------------------------------|
 | Frontend  | Next.js 14, React, Tailwind CSS   |
 | Backend   | FastAPI, Python 3.12              |
-| AI Model  | Gemini 2.0 Flash (Live API)       |
+| AI Model  | Gemini 2.5 Flash (Live API)       |
 | Transport | WebSockets (binary + JSON)        |
 | Cloud     | Cloud Run, Firestore, Secret Mgr  |
 | SDK       | google-genai (Python)             |
