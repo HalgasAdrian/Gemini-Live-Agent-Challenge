@@ -4,7 +4,7 @@ import { BACKEND_WS_URL } from "@/lib/constants";
 export type WSStatus = "disconnected" | "connecting" | "connected" | "error";
 
 export interface WSMessage {
-  type: "transcript" | "interrupted" | "turn_complete" | "session_ready" | "error";
+  type: "transcript" | "input_transcript" | "interrupted" | "turn_complete" | "session_ready" | "error";
   text?: string;
   session_id?: string;
   agent?: string;
@@ -17,11 +17,6 @@ interface UseWebSocketOptions {
   onDisconnect?: () => void;
 }
 
-/**
- * Manages the WebSocket connection to the backend.
- *
- * Separates binary frames (audio) from JSON text frames (events).
- */
 export function useWebSocket({
   onAudioChunk,
   onMessage,
@@ -40,16 +35,13 @@ export function useWebSocket({
 
       ws.onopen = () => {
         setStatus("connected");
-        // Send config as first message
         ws.send(JSON.stringify({ type: "config", preset }));
       };
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
-          // Binary = audio from Gemini
           onAudioChunk(event.data);
         } else {
-          // Text = JSON event
           try {
             const msg: WSMessage = JSON.parse(event.data);
             onMessage(msg);

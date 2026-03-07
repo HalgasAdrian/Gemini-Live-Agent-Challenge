@@ -13,16 +13,12 @@ import Controls from "./Controls";
 type SessionState = "idle" | "active";
 
 export default function AgentPanel() {
-  // ---- State ----
   const [sessionState, setSessionState] = useState<SessionState>("idle");
   const [agentName, setAgentName] = useState("general");
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const sessionIdRef = useRef<string>("");
-
-  // Buffer to accumulate streaming transcript chunks
   const assistantBufferRef = useRef<string>("");
 
-  // ---- Helpers ----
   const addEntry = useCallback(
     (role: "user" | "assistant" | "system", text: string) => {
       setTranscript((prev) => [
@@ -38,10 +34,8 @@ export default function AgentPanel() {
     []
   );
 
-  // ---- Audio Playback ----
   const { playChunk, flush: flushAudio } = useAudioPlayback();
 
-  // ---- WebSocket ----
   const handleAudioChunk = useCallback(
     (data: ArrayBuffer) => {
       playChunk(data);
@@ -58,12 +52,18 @@ export default function AgentPanel() {
           break;
 
         case "transcript":
-          // Accumulate streaming text, we'll flush on turn_complete
+          // Accumulate streaming agent transcript
           assistantBufferRef.current += (msg.text || "");
           break;
 
+        case "input_transcript":
+          // User's speech transcribed — show in chat
+          if (msg.text && msg.text.trim()) {
+            addEntry("user", msg.text);
+          }
+          break;
+
         case "turn_complete":
-          // Flush accumulated transcript
           if (assistantBufferRef.current) {
             addEntry("assistant", assistantBufferRef.current);
             assistantBufferRef.current = "";
@@ -72,7 +72,6 @@ export default function AgentPanel() {
 
         case "interrupted":
           flushAudio();
-          // Flush whatever partial transcript we had
           if (assistantBufferRef.current) {
             addEntry("assistant", assistantBufferRef.current + " [interrupted]");
             assistantBufferRef.current = "";
@@ -105,11 +104,9 @@ export default function AgentPanel() {
     onDisconnect: handleDisconnect,
   });
 
-  // ---- Mic ----
   const { start: startMic, stop: stopMic, isCapturing: isMicActive } =
     useAudioCapture(sendAudio);
 
-  // ---- Camera ----
   const {
     videoRef,
     start: startCamera,
@@ -117,7 +114,6 @@ export default function AgentPanel() {
     isActive: isCameraActive,
   } = useCameraCapture(sendImage);
 
-  // ---- Actions ----
   const handleStart = useCallback(
     (presetId: string) => {
       const sessionId = crypto.randomUUID();
@@ -161,7 +157,6 @@ export default function AgentPanel() {
     [sendText, addEntry]
   );
 
-  // ---- Render ----
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white">
       <StatusBar
@@ -175,16 +170,18 @@ export default function AgentPanel() {
         <AgentSelector onStart={handleStart} />
       ) : (
         <>
-          {/* Camera preview (shown when camera is active) */}
+          {/* Camera preview — fixed position, never moves regardless of scroll */}
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`fixed bottom-32 right-4 z-50 w-48 h-36 rounded-xl object-cover border-2 border-gray-600 shadow-lg shadow-black/50 ${isCameraActive ? "" : "hidden"}`}
+          />
           {isCameraActive && (
-            <div className="flex justify-center bg-black py-2">
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-48 h-36 rounded-lg object-cover border border-gray-700"
-              />
+            <div className="fixed bottom-[10.5rem] right-5 z-50 flex items-center gap-1.5 bg-black/60 rounded-full px-2 py-0.5">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-[10px] text-white font-medium">LIVE</span>
             </div>
           )}
 

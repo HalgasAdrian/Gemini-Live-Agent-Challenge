@@ -1,30 +1,5 @@
 """
 WebSocket endpoint — the heart of the real-time agent.
-
-Protocol (client ↔ server):
-
-CLIENT → SERVER:
-  - Binary frame:    Raw PCM audio (16-bit, 16kHz, mono)
-  - JSON text frame: {
-      "type": "config",       → Set agent preset before starting
-      "preset": "tutor"
-    }
-  - JSON text frame: {
-      "type": "image",        → Camera frame
-      "data": "<base64 JPEG>"
-    }
-  - JSON text frame: {
-      "type": "text",         → Text message (non-voice input)
-      "text": "hello"
-    }
-
-SERVER → CLIENT:
-  - Binary frame:    PCM audio response chunks
-  - JSON text frame: {"type": "transcript",    "text": "..."}
-  - JSON text frame: {"type": "interrupted"}
-  - JSON text frame: {"type": "turn_complete"}
-  - JSON text frame: {"type": "error",         "message": "..."}
-  - JSON text frame: {"type": "session_ready",  "session_id": "..."}
 """
 
 import asyncio
@@ -35,7 +10,11 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.agents.presets import get_agent_preset
-from app.services.gemini_live import create_live_session
+from app.services.gemini_live import (
+    get_gemini_client,
+    build_live_config,
+    LiveSession,
+)
 from app.services.session_manager import session_manager
 from app.services import firestore
 
@@ -45,58 +24,85 @@ router = APIRouter()
 
 @router.websocket("/ws/session/{session_id}")
 async def websocket_endpoint(ws: WebSocket, session_id: str):
-    """
-    Main WebSocket handler for a live agent session.
-
-    Lifecycle:
-    1. Client connects, optionally sends a config message with preset choice
-    2. Server creates a Gemini Live session
-    3. Two concurrent loops run:
-       - forward_client_to_gemini: client audio/images → Gemini
-       - forward_gemini_to_client: Gemini responses → client
-    4. On disconnect, everything is cleaned up
-    """
     await ws.accept()
     logger.info(f"WebSocket connected: {session_id}")
 
     user_session = session_manager.register(session_id)
-    preset_id = "general"  # Default, can be overridden by first message
+    preset_id = "general"
 
     try:
-        # ---- Step 1: Wait for optional config or start immediately ----
-        # Give client 2 seconds to send a config message
+        # ---- Step 1: Wait for optional config ----
         try:
             initial_msg = await asyncio.wait_for(ws.receive_text(), timeout=2.0)
             msg = json.loads(initial_msg)
             if msg.get("type") == "config":
                 preset_id = msg.get("preset", "general")
                 logger.info(f"Session {session_id} configured with preset: {preset_id}")
-        except asyncio.TimeoutError:
-            pass  # No config sent, use default
-        except Exception:
-            pass  # Not a valid config message, proceed with default
+        except (asyncio.TimeoutError, Exception):
+            pass
 
         # ---- Step 2: Create Gemini Live session ----
         preset = get_agent_preset(preset_id)
         user_session.agent_preset_id = preset_id
-        live_session = await create_live_session(preset)
-        user_session.live_session = live_session
 
-        # Log session start
-        await firestore.log_session_start(session_id, preset_id)
+        from app.config import get_settings
+        settings = get_settings()
 
-        # Notify client that session is ready
-        await ws.send_json({
-            "type": "session_ready",
-            "session_id": session_id,
-            "agent": preset_id,
-        })
+        client = get_gemini_client()
+        config = build_live_config(preset)
 
-        # ---- Step 3: Run bidirectional streaming ----
-        await asyncio.gather(
-            _forward_client_to_gemini(ws, live_session, user_session),
-            _forward_gemini_to_client(ws, live_session, user_session),
-        )
+        logger.info(f"Creating Gemini Live session with preset '{preset.name}'")
+
+        async with client.aio.live.connect(
+            model=settings.gemini_model,
+            config=config,
+        ) as gemini_session:
+            live_session = LiveSession(session=gemini_session, preset=preset)
+            user_session.live_session = live_session
+
+            await firestore.log_session_start(session_id, preset_id)
+
+            await ws.send_json({
+                "type": "session_ready",
+                "session_id": session_id,
+                "agent": preset_id,
+            })
+
+            logger.info(f"Session {session_id} is live!")
+
+            # ---- Step 3: Run bidirectional streaming ----
+            client_task = asyncio.create_task(
+                _forward_client_to_gemini(ws, live_session, user_session),
+                name=f"client-{session_id[:8]}",
+            )
+            gemini_task = asyncio.create_task(
+                _forward_gemini_to_client(ws, live_session, user_session),
+                name=f"gemini-{session_id[:8]}",
+            )
+
+            done, pending = await asyncio.wait(
+                [client_task, gemini_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Log which task finished first
+            for task in done:
+                logger.info(f"Task '{task.get_name()}' completed first in session {session_id}")
+
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            for task in done:
+                try:
+                    task.result()
+                except (WebSocketDisconnect, asyncio.CancelledError):
+                    pass
+                except Exception as e:
+                    logger.error(f"Task '{task.get_name()}' error: {e}")
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {session_id}")
@@ -107,7 +113,6 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
         except Exception:
             pass
     finally:
-        # ---- Step 4: Cleanup ----
         turn_count = len(user_session.turns)
         await firestore.log_session_end(session_id, turn_count)
         await session_manager.remove(session_id)
@@ -116,24 +121,26 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
 
 async def _forward_client_to_gemini(
     ws: WebSocket,
-    live_session,
+    live_session: LiveSession,
     user_session,
 ) -> None:
-    """
-    Reads messages from the WebSocket client and forwards them to Gemini.
-    Handles audio (binary), images (JSON+base64), and text (JSON).
-    """
+    """Client audio/images/text → Gemini. Runs until client disconnects."""
     try:
         while live_session.is_active:
-            message = await ws.receive()
+            try:
+                message = await ws.receive()
+            except WebSocketDisconnect:
+                logger.info(f"Client WS disconnected in receive loop")
+                raise
+            except RuntimeError:
+                logger.info(f"Client WS already disconnected")
+                break
+
             user_session.touch()
 
-            # --- Binary frame = raw PCM audio ---
             if "bytes" in message and message["bytes"]:
-                audio_data = message["bytes"]
-                await live_session.send_audio(audio_data)
+                await live_session.send_audio(message["bytes"])
 
-            # --- Text frame = JSON command ---
             elif "text" in message and message["text"]:
                 try:
                     msg = json.loads(message["text"])
@@ -143,10 +150,13 @@ async def _forward_client_to_gemini(
                 msg_type = msg.get("type", "")
 
                 if msg_type == "image":
-                    # Camera frame: base64-encoded JPEG
                     image_b64 = msg.get("data", "")
                     if image_b64:
                         image_bytes = base64.b64decode(image_b64)
+                        logger.info(
+                            f"📷 Camera frame received: {len(image_bytes)} bytes "
+                            f"(session {user_session.session_id[:8]})"
+                        )
                         await live_session.send_image(image_bytes)
                         user_session.log_turn("user", "image")
                         await firestore.log_turn(
@@ -154,9 +164,9 @@ async def _forward_client_to_gemini(
                         )
 
                 elif msg_type == "text":
-                    # Text input (non-voice)
                     text = msg.get("text", "")
                     if text:
+                        logger.info(f"User text: {text[:80]}")
                         await live_session.send_text(text)
                         user_session.log_turn("user", "text", text)
                         await firestore.log_turn(
@@ -165,58 +175,78 @@ async def _forward_client_to_gemini(
 
     except WebSocketDisconnect:
         raise
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
-        logger.error(f"Client→Gemini forwarding error: {e}")
+        logger.error(f"Client→Gemini error: {e}")
         raise
 
 
 async def _forward_gemini_to_client(
     ws: WebSocket,
-    live_session,
+    live_session: LiveSession,
     user_session,
 ) -> None:
     """
-    Reads response events from Gemini and forwards them to the WebSocket client.
-    Handles audio, text transcripts, interruptions, and turn completion.
+    Gemini responses → Client.
+
+    The receive() generator may complete after a response turn on some models.
+    We wrap it in a while loop so the task stays alive for the full session.
     """
     try:
-        async for event in live_session.receive():
-            user_session.touch()
-            event_type = event["type"]
+        while live_session.is_active:
+            event_count = 0
+            async for event in live_session.receive():
+                event_count += 1
+                user_session.touch()
+                event_type = event["type"]
 
-            if event_type == "audio":
-                # Stream audio bytes directly to client
-                await ws.send_bytes(event["data"])
+                try:
+                    if event_type == "audio":
+                        await ws.send_bytes(event["data"])
 
-            elif event_type == "text":
-                # Send transcript as JSON
-                await ws.send_json({
-                    "type": "transcript",
-                    "text": event["text"],
-                })
-                user_session.log_turn("assistant", "text", event["text"])
-                await firestore.log_turn(
-                    user_session.session_id, "assistant", "text", event["text"]
-                )
+                    elif event_type == "text":
+                        await ws.send_json({
+                            "type": "transcript",
+                            "text": event["text"],
+                        })
+                        user_session.log_turn("assistant", "text", event["text"])
+                        await firestore.log_turn(
+                            user_session.session_id, "assistant", "text", event["text"]
+                        )
 
-            elif event_type == "interrupted":
-                # Agent was interrupted by user speaking
-                await ws.send_json({"type": "interrupted"})
-                logger.debug(f"Session {user_session.session_id}: interrupted")
+                    elif event_type == "input_transcript":
+                        await ws.send_json({
+                            "type": "input_transcript",
+                            "text": event["text"],
+                        })
+                        user_session.log_turn("user", "text", event["text"])
 
-            elif event_type == "turn_complete":
-                await ws.send_json({"type": "turn_complete"})
+                    elif event_type == "interrupted":
+                        await ws.send_json({"type": "interrupted"})
+                        logger.debug(f"Session {user_session.session_id}: interrupted")
 
-            elif event_type == "tool_call":
-                # For now, log tool calls. Custom tool handling can be added here.
-                logger.info(f"Tool call: {event['tool_call']}")
-                # The Live API handles google_search automatically,
-                # but for custom function calls you'd execute them and
-                # send results back:
-                # await live_session.send_tool_response([...])
+                    elif event_type == "turn_complete":
+                        await ws.send_json({"type": "turn_complete"})
+                        logger.info(f"Session {user_session.session_id}: turn complete (turn #{live_session.turn_count})")
 
-    except WebSocketDisconnect:
+                    elif event_type == "tool_call":
+                        logger.info(f"Tool call: {event['tool_call']}")
+
+                except (WebSocketDisconnect, RuntimeError):
+                    live_session.is_active = False
+                    break
+
+            # If we get here, the async for completed (generator exhausted)
+            logger.warning(
+                f"Session {user_session.session_id}: Gemini receive stream ended "
+                f"after {event_count} events. Restarting receive loop..."
+            )
+            # Brief pause before restarting to avoid tight loop
+            await asyncio.sleep(0.1)
+
+    except asyncio.CancelledError:
         raise
     except Exception as e:
-        logger.error(f"Gemini→Client forwarding error: {e}")
+        logger.error(f"Gemini→Client error: {e}")
         raise
