@@ -20,25 +20,35 @@ Built for the **#GeminiLiveAgentChallenge** hackathon.
 git clone https://github.com/YOUR_TEAM/gemini-live-agent.git
 cd gemini-live-agent
 
-# VENV instructions:
+# 2. Set up your virtual environment
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 
-# 2. Copy env and add your Gemini API key
+# 3. Copy env and add your Gemini API key
 cp .env.example .env
 
-# 3. Install & run
+# 4. Install & run
 
 # Mac/Linux:
 make install
 make dev
 
-# Windows (PowerShell):
-.\dev.ps1 install
-.\dev.ps1 dev
-
-# 4. Open http://localhost:3000
+# 5. Open http://localhost:3000
 ```
+
+#### Windows Setup
+
+Open **two separate PowerShell terminals**:
+
+```powershell
+# Terminal 1 — Backend
+cd backend; .\venv\Scripts\Activate.ps1; uvicorn app.main:app --reload --port 8080
+
+# Terminal 2 — Frontend
+cd frontend; npm run dev
+```
+
+Then open http://localhost:3000
 
 ### Option B: Docker
 
